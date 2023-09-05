@@ -31,6 +31,8 @@ from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_line
 from utils.model.model_utils import create_hf_model
 from utils.perf import print_throughput
 
+from pdb import set_trace as Tra
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -199,6 +201,7 @@ def main():
         deepspeed.init_distributed()
 
     args.global_rank = torch.distributed.get_rank()
+    print(args.global_rank)
 
     ds_config = get_train_ds_config(offload=args.offload,
                                     stage=args.zero_stage,
@@ -232,6 +235,9 @@ def main():
             model = make_model_gradient_checkpointing_compatible(model)
 
     # Prepare the data
+    print(args.data_path)
+    print(args.data_output_path)
+    print(args.sft_only_data_path)
     train_phase = 1
     train_dataset, eval_dataset = create_prompt_dataset(
         args.local_rank,
@@ -242,7 +248,10 @@ def main():
         args.seed,
         tokenizer,
         args.max_seq_len,
-        sft_only_data_path=args.sft_only_data_path)
+        sft_only_data_path=args.sft_only_data_path
+    )
+    # Tra()
+
     # DataLoaders creation:
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_dataset)
