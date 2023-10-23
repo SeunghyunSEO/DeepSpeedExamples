@@ -9,6 +9,7 @@ import os
 import time
 import deepspeed
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.accelerator import get_accelerator
 
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
@@ -18,7 +19,8 @@ from utils.utils import print_rank_0
 
 def print_all_ranks(tag, value, rank):
     world_size = torch.distributed.get_world_size()
-    all_tensor = torch.zeros(world_size, dtype=torch.float32).cuda()
+    all_tensor = torch.zeros(world_size, dtype=torch.float32).to(
+        get_accelerator().current_device_name())
     all_tensor[rank] = value
     torch.distributed.all_reduce(all_tensor, op=torch.distributed.ReduceOp.SUM)
     print_rank_0(f'{tag} {all_tensor}', rank)
@@ -58,6 +60,7 @@ class DeepSpeedPPOTrainer():
         self.end_of_conversation_token_id = self.tokenizer(
             args.end_of_conversation_token)['input_ids'][-1]
         self.z3_enabled = args.actor_zero_stage == 3
+        self.compute_fp32_loss = self.args.compute_fp32_loss
 
         # Those value can be changed
         self.kl_ctl = 0.1
@@ -75,7 +78,7 @@ class DeepSpeedPPOTrainer():
         # This has been added due to a probability/nan error that happens after
         # meta-llama/Llama-2-7b-hf enabled do_sample:
         # https://huggingface.co/meta-llama/Llama-2-7b-hf/commit/6fdf2e60f86ff2481f2241aaee459f85b5b0bbb9
-        if self.actor_model.model.config.model_type == "llama":
+        if self.actor_model.module.config.model_type == "llama":
             kwargs = dict(do_sample=False)
         else:
             kwargs = dict()
@@ -137,6 +140,9 @@ class DeepSpeedPPOTrainer():
 
         logits = output.logits
         logits_ref = output_ref.logits
+        if self.compute_fp32_loss:
+            logits = logits.to(torch.float)
+            logits_ref = logits_ref.to(torch.float)
 
         self.generate_time = generate_end - generate_start
 
@@ -242,6 +248,11 @@ class DeepSpeedPPOTrainer():
         return actor_loss, critic_loss
 
     def get_overflow(self):
+        # Overflow is not expected when using bf16
+        # Therefore, DeepSpeed's BF16_Optimizer does not maintain an overflow indication
+        if self.args.dtype == "bf16":
+            return False, False
+
         actor_overflow = self.actor_model.optimizer.overflow
         critic_overflow = self.critic_model.optimizer.overflow
 
@@ -264,6 +275,9 @@ class DeepSpeedPPOTrainer():
             old_values - self.cliprange_value,
             old_values + self.cliprange_value,
         )
+        if self.compute_fp32_loss:
+            values = values.float()
+            values_clipped = values_clipped.float()
         vf_loss1 = (values - returns)**2
         vf_loss2 = (values_clipped - returns)**2
         vf_loss = 0.5 * torch.sum(
